@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GoLLM-Playground · 围棋对战</title>
+<style>
+  :root{
+    --bg:#f2ecdf; --panel:#faf7ef; --ink:#2b2a26; --muted:#8a857a;
+    --line:#6b655a; --accent:#a9552e; --wood:#dcb35c; --wood-dark:#c9a04b;
+    --shadow:0 1px 3px rgba(0,0,0,.08),0 8px 24px rgba(90,70,30,.10);
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{
+    font-family:"PingFang SC","Microsoft YaHei",system-ui,sans-serif;
+    background:var(--bg); color:var(--ink);
+    min-height:100vh; display:flex; align-items:center; justify-content:center; padding:24px;
+  }
+  .layout{display:flex; gap:28px; align-items:flex-start; flex-wrap:wrap; justify-content:center}
+  .board-wrap{
+    background:var(--panel); border-radius:16px; padding:20px;
+    box-shadow:var(--shadow);
+  }
+  .board-head{display:flex; justify-content:space-between; align-items:center; margin-bottom:14px}
+  .title{font-weight:700; font-size:17px; letter-spacing:.5px}
+  .status{font-size:13px; color:var(--muted)}
+  .status b{color:var(--accent); font-weight:600}
+  canvas{
+    display:block; border-radius:8px; cursor:pointer;
+    background:radial-gradient(ellipse at center, #e6c476 0%, var(--wood) 55%, var(--wood-dark) 100%);
+    box-shadow:inset 0 0 24px rgba(120,90,30,.25);
+    touch-action:manipulation;
+  }
+  .tools{display:flex; gap:10px; margin-top:14px; flex-wrap:wrap}
+  .tools button{
+    flex:1; min-width:96px; padding:10px 0; font-size:14px; border:1px solid #d8d0bc;
+    background:#fff; color:var(--ink); border-radius:10px; cursor:pointer; font-family:inherit;
+    transition:background .15s, border-color .15s;
+  }
+  .tools button:hover:not(:disabled){background:#f4eee0; border-color:var(--accent)}
+  .tools button:disabled{opacity:.45; cursor:not-allowed}
+  .tools button.primary{background:var(--accent); border-color:var(--accent); color:#fff}
+  .tools button.primary:hover:not(:disabled){background:#974a28}
+  .side{
+    width:280px; background:var(--panel); border-radius:16px; padding:18px;
+    box-shadow:var(--shadow); display:flex; flex-direction:column; gap:14px;
+  }
+  .info-row{display:flex; justify-content:space-between; font-size:13.5px; color:var(--muted)}
+  .info-row b{color:var(--ink); font-weight:600}
+  .log-box{
+    flex:1; min-height:220px; max-height:420px; overflow-y:auto; font-size:12.5px;
+    line-height:1.75; background:#fffdf7; border:1px solid #e8e0cc; border-radius:10px; padding:10px 12px;
+  }
+  .log-box .t{color:var(--muted)}
+  .log-box .black{color:#222}
+  .log-box .white{color:var(--accent)}
+  .log-box .warn{color:#b0622c}
+  .result-banner{
+    background:#f3e3cd; border:1px solid #e0c69a; color:#7a4c1f;
+    border-radius:10px; padding:10px 12px; font-size:13px; line-height:1.6;
+  }
+  .hint{font-size:12px; color:var(--muted); text-align:center; margin-top:8px}
+  .loading{pointer-events:none}
+</style>
+</head>
+<body>
+<div class="layout">
+  <div class="board-wrap">
+    <div class="board-head">
+      <div class="title">GoLLM-Playground</div>
+      <div class="status" id="status">执白 · 等待开局</div>
+    </div>
+    <canvas id="board" width="620" height="620"></canvas>
+    <div class="tools">
+      <button id="btn-ai" class="primary">AI 落子</button>
+      <button id="btn-pass">Pass</button>
+      <button id="btn-reset">重新开始</button>
+    </div>
+    <div class="hint">你执白（AI 执黑先行）· 点击棋盘落子</div>
+  </div>
+
+  <div class="side">
+    <div class="info-row"><span>轮次</span><b id="move-num">0</b></div>
+    <div class="info-row"><span>提子（黑 / 白）</span><b id="captured">0 / 0</b></div>
+    <div id="result" class="result-banner" style="display:none"></div>
+    <div class="log-box" id="log"></div>
+  </div>
+</div>
+
+<script>
+(function(){
+  const SIZE = 19;
+  const PAD = 26;
+  const canvas = document.getElementById('board');
+  const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  const cell = (W - PAD * 2) / (SIZE - 1);
+
+  const $ = id => document.getElementById(id);
+  const logBox = $('log');
+  let state = null;
+  let busy = false;
+
+  // ---------- 日志 ----------
+  function log(text, cls){
+    const div = document.createElement('div');
+    if (cls) div.className = cls;
+    div.textContent = text;
+    logBox.appendChild(div);
+    logBox.scrollTop = logBox.scrollHeight;
+  }
+
+  // ---------- 棋盘绘制 ----------
+  function draw(){
+    ctx.clearRect(0, 0, W, H);
+    // 星位
+    const stars = [3, 9, 15];
+    for (const sx of stars){
+      for (const sy of stars){
+        ctx.beginPath();
+        ctx.arc(PAD + sx * cell, PAD + sy * cell, 4, 0, Math.PI * 2);
+        ctx.fillStyle = '#4a443a';
+        ctx.fill();
+      }
+    }
+    // 网格
+    ctx.strokeStyle = '#4a443a';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let i = 0; i < SIZE; i++){
+      const p = PAD + i * cell;
+      ctx.moveTo(p, PAD);
+      ctx.lineTo(p, PAD + (SIZE - 1) * cell);
+      ctx.moveTo(PAD, p);
+      ctx.lineTo(PAD + (SIZE - 1) * cell, p);
+    }
+    ctx.stroke();
+    // 坐标标签（A-T，跳过 I）
+    ctx.fillStyle = '#5c5548';
+    ctx.font = '10px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    for (let i = 0; i < SIZE; i++){
+      const ch = String.fromCharCode(65 + i + (i >= 8 ? 1 : 0));
+      ctx.fillText(ch, PAD + i * cell, PAD - 14);
+      ctx.fillText(String(SIZE - i), PAD - 14, PAD + i * cell);
+    }
+    // 棋子
+    if (!state) return;
+    const grid = state.grid;
+    for (let y = 0; y < SIZE; y++){
+      for (let x = 0; x < SIZE; x++){
+        const v = grid[y] && grid[y][x];
+        if (!v) continue;
+        const px = PAD + x * cell, py = PAD + y * cell;
+        const r = cell * 0.46;
+        ctx.beginPath();
+        ctx.arc(px, py, r, 0, Math.PI * 2);
+        const grad = ctx.createRadialGradient(px - r*0.35, py - r*0.35, r*0.1, px, py, r);
+        if (v === 1){
+          grad.addColorStop(0, '#5a5a5a');
+          grad.addColorStop(1, '#141414');
+        } else {
+          grad.addColorStop(0, '#ffffff');
+          grad.addColorStop(1, '#c9c4b8');
+        }
+        ctx.fillStyle = grad;
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(0,0,0,.35)';
+        ctx.lineWidth = 0.8;
+        ctx.stroke();
+      }
+    }
+    // 最后一手标记
+    if (state.last_move){
+      const [lx, ly] = state.last_move;
+      const px = PAD + lx * cell, py = PAD + ly * cell;
+      ctx.beginPath();
+      ctx.arc(px, py, 4, 0, Math.PI * 2);
+      ctx.fillStyle = state.grid[ly][lx] === 1 ? '#e8e8e8' : '#b06a3a';
+      ctx.fill();
+    }
+  }
+
+  // ---------- 状态刷新 ----------
+  function render(){
+    if (!state) return;
+    $('move-num').textContent = state.move_num;
+    $('captured').textContent = `${state.captured[1]} / ${state.captured[2]}`;
+    const st = $('status');
+    if (state.over){
+      st.innerHTML = '对局结束';
+      const r = $('result');
+      r.style.display = 'block';
+      r.textContent = state.result;
+    } else {
+      st.innerHTML = state.turn === 1 ? '<b>黑方</b>思考中…' : '轮到你（<b>白</b>）落子';
+    }
+    $('btn-ai').disabled = busy || state.over || state.turn !== 1;
+    $('btn-pass').disabled = busy || state.over || state.turn !== 2;
+    draw();
+  }
+
+  async function refresh(){
+    const res = await fetch('/api/state');
+    state = await res.json();
+    render();
+    // 轮到 AI 且未在忙时自动触发
+    if (!busy && state && !state.over && state.turn === 1){
+      await aiMove();
+    }
+  }
+
+  async function api(path, body){
+    const res = await fetch(path, {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body || {})});
+    return res.json();
+  }
+
+  async function aiMove(){
+    if (busy) return;
+    busy = true;
+    canvas.classList.add('loading');
+    log('AI 思考中…', 't');
+    try {
+      const ret = await api('/api/ai');
+      state = ret.state;
+      if (ret.move === 'PASS'){
+        log(ret.blocked ? `AI 想下 ${ret.blocked}（非法，规则拦截）→ PASS` : 'AI：PASS', 'black');
+      } else {
+        log(`AI（黑）落子 ${ret.move}`, 'black');
+      }
+      render();
+      if (state && state.over){
+        log('—— 对局结束 ——', 't');
+      }
+    } catch(e){
+      log('AI 调用失败：' + e, 'warn');
+    } finally {
+      busy = false;
+      canvas.classList.remove('loading');
+      render();
+    }
+  }
+
+  // ---------- 交互 ----------
+  canvas.addEventListener('click', async e => {
+    if (busy || !state || state.over || state.turn !== 2) return;
+    const rect = canvas.getBoundingClientRect();
+    const scaleX = W / rect.width, scaleY = H / rect.height;
+    const mx = (e.clientX - rect.left) * scaleX;
+    const my = (e.clientY - rect.top) * scaleY;
+    const x = Math.round((mx - PAD) / cell);
+    const y = Math.round((my - PAD) / cell);
+    if (x < 0 || x >= SIZE || y < 0 || y >= SIZE) return;
+
+    busy = true;
+    try {
+      const ret = await api('/api/move', {x, y});
+      if (ret.ok){
+        state = ret.state;
+        const gtp = gtpName(x, y);
+        log(`你（白）落子 ${gtp}`, 'white');
+        render();
+        if (state && !state.over && state.turn === 1){
+          await aiMove();
+        }
+      } else {
+        log('非法落子：' + ret.msg, 'warn');
+        render();
+      }
+    } catch(err){
+      log('请求失败：' + err, 'warn');
+    } finally {
+      busy = false;
+      render();
+    }
+  });
+
+  function gtpName(x, y){
+    const col = String.fromCharCode(65 + x + (x >= 8 ? 1 : 0));
+    return col + (SIZE - y);
+  }
+
+  $('btn-ai').addEventListener('click', aiMove);
+  $('btn-pass').addEventListener('click', async () => {
+    if (busy) return;
+    busy = true;
+    try {
+      const ret = await api('/api/pass');
+      state = ret.state;
+      log('你：PASS', 'white');
+      render();
+      if (state && !state.over && state.turn === 1){
+        await aiMove();
+      }
+    } finally {
+      busy = false;
+    }
+  });
+  $('btn-reset').addEventListener('click', async () => {
+    if (busy) return;
+    busy = true;
+    try {
+      await api('/api/reset');
+      logBox.innerHTML = '';
+      $('result').style.display = 'none';
+      log('—— 新对局开始（你执白）——', 't');
+      await refresh();
+    } finally {
+      busy = false;
+    }
+  });
+
+  // 启动
+  refresh();
+})();
+</script>
+</body>
+</html>
